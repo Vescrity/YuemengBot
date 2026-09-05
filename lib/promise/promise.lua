@@ -1,22 +1,10 @@
 --- promise.lua - 单线程事件循环 + Promise/A+ 风格
 --- thenDo / catch / finally + 组合器(all/allSettled/race/any)
 --- + 定时器(delay/withTimeout) + IO(fd) + 协程桥(sync/await)
---- Promise 层与后端解耦：优先 luv(libuv)，回退 luasocket。
---- 后端只提供 timer / wait_fd / pending / step 四个原语。
+--- 后端固定为 luv(libuv)。
+--- 后端只提供 timer / wait_fd / hold / pending / step 五个原语。
 
--- ---------- 后端选择 ----------
--- 优先 luv（libuv），回退 luasocket。可用环境变量 PROMISE_BACKEND 强制：
---   PROMISE_BACKEND=luasocket lua xxx.lua
-local backend
-do
-    local forced = rawget(_G, "PROMISE_BACKEND") or os.getenv("PROMISE_BACKEND")
-    if forced == "luasocket" then
-        backend = require("backend_luasocket")
-    else
-        local ok, b = pcall(require, "backend_luv")
-        if ok then backend = b else backend = require("backend_luasocket") end
-    end
-end
+local backend = require("backend_luv")
 
 local M = {}
 M.__index = M
@@ -270,6 +258,12 @@ function M.any(list)
 end
 
 -- ---------- 定时器 / IO ----------
+
+-- 保活事件循环：返回一个 release 函数，调用前会阻止 run() 提前退出。
+-- 供线程池等"不在 timer/wait_fd 内"的异步操作使用。
+function M.hold()
+    return backend.hold()
+end
 
 function M.delay(ms, value)
     local p = new_promise()

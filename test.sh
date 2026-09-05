@@ -3,16 +3,29 @@
 set -e
 cd "$(dirname "$0")"
 
-echo "=== promise 库测试（luv 后端，默认） ==="
+echo "=== promise 库测试（luv 后端） ==="
 lua lib/promise/test/test_promise.lua
 
 echo
-echo "=== promise 库测试（luasocket 后端） ==="
-PROMISE_BACKEND=luasocket lua lib/promise/test/test_promise.lua
+echo "=== promise 并发验证 ==="
+lua lib/promise/test/test_concurrency.lua
 
 echo
-echo "=== promise 并发验证（luv 后端） ==="
-lua lib/promise/test/test_concurrency.lua
+echo "=== 编译 http C 绑定 ==="
+bash lib/http/build.sh
+
+echo
+echo "=== http 库测试 ==="
+PORT=8000
+python3 test.local/http_server.py "$PORT" >/tmp/jm_async_http_server.log 2>&1 &
+SERVER_PID=$!
+trap 'kill "$SERVER_PID" 2>/dev/null' EXIT
+sleep 0.5
+lua lib/http/test/test_http.lua "$PORT"
+
+echo
+echo "=== http server 自测 ==="
+timeout 30 lua lib/http/test/test_server.lua
 
 echo
 echo "=== 全部通过 ==="
