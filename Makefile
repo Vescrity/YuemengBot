@@ -33,6 +33,7 @@ install:
 	@sed -e 's|@PREFIX@|$(PREFIX)|g' -e 's|@VERSION@|$(VERSION)|g' \
 		bin/yuemeng.in > "$(DESTDIR)$(BIN_DIR)/yuemeng"
 	@chmod +x "$(DESTDIR)$(BIN_DIR)/yuemeng"
+	@$(INSTALL) -m 755 tools/yuedbg "$(DESTDIR)$(BIN_DIR)/yuedbg"
 
 run:
 	LUA_PATH="src/?.lua;src/?/init.lua;lib/promise/?.lua;lib/http/?.lua;;" \

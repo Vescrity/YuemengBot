@@ -7,7 +7,10 @@ local debug = {}
 local state = {
     pipe = nil,
     path = nil,
+    env = nil,
 }
+
+local DEFAULT_RC = "core = require('core'); P = require('promise')"
 
 local function readInt32BE(s, i)
     local a, b, c, d = string.byte(s, i, i + 3)
@@ -24,9 +27,22 @@ local function packFrame(payload)
     ) .. payload
 end
 
+local function runRc(env, source)
+    local fn, err = load(source, "=debug-rc", "t", env)
+    if not fn then
+        io.stderr:write("[debug] rc 编译失败: " .. tostring(err) .. "\n")
+        return
+    end
+    local ok, e = pcall(fn)
+    if not ok then
+        io.stderr:write("[debug] rc 执行失败: " .. tostring(e) .. "\n")
+    end
+end
+
 local function execute(source)
+    local env = state.env
     local out = {}
-    local env = setmetatable({}, { __index = _G })
+    local savedPrint = env.print
     env.print = function(...)
         local parts = {}
         for i = 1, select("#", ...) do
@@ -36,9 +52,11 @@ local function execute(source)
     end
     local fn, err = load(source, "=debug", "t", env)
     if not fn then
+        env.print = savedPrint
         return { ok = false, output = table.concat(out, "\n"), error = err }
     end
     local results = table.pack(pcall(fn))
+    env.print = savedPrint
     if not results[1] then
         return { ok = false, output = table.concat(out, "\n"), error = tostring(results[2]) }
     end
@@ -82,6 +100,7 @@ function debug.start(opts)
     os.remove(path)
     local pipe = uv.new_pipe(false)
     assert(uv.pipe_bind(pipe, path), "debug socket 绑定失败: " .. path)
+    uv.fs_chmod(path, 448)
     uv.listen(pipe, 128, function(err)
         if err then return end
         local client = uv.new_pipe(false)
@@ -93,6 +112,9 @@ function debug.start(opts)
     end)
     state.pipe = pipe
     state.path = path
+    local env = setmetatable({}, { __index = _G })
+    state.env = env
+    runRc(env, opts.rc or DEFAULT_RC)
     return debug
 end
 
@@ -105,6 +127,7 @@ function debug.stop()
         os.remove(state.path)
         state.path = nil
     end
+    state.env = nil
     return debug
 end
 

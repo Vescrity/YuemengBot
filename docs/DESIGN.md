@@ -277,9 +277,12 @@ logger:fatal(msg, ...)
 
 ## 7. Debug 框架 `core/debug`
 
-- unix socket（文件，默认 `$XDG_RUNTIME_DIR/yuemeng.sock`），非 TCP；底层用 luv pipe（luasocket 无 unix 支持）。
+- unix socket（文件，默认 `$XDG_RUNTIME_DIR/yuemeng.sock`），非 TCP；底层用 luv pipe（luasocket 无 unix 支持）；socket 文件权限 `700`（最高权，仅属主可连）。
 - 协议：4 字节大端长度前缀 + 载荷。
 - 请求 = Lua 源码；响应 = 输出或 traceback；每请求独立 `P.sync` 协程，与总线解耦。
+- **持久 REPL 环境**：求值环境是跨请求复用的 `env`（`setmetatable({}, { __index = _G })`），全局赋值写进 `env` 持久、不污染真 `_G`；`print` 输出被捕获回传。
+- **rc**：`debug.start({ rc = "..." })` 可选，默认执行 `core = require('core'); P = require('promise')`（种子进 `env`，不进真 `_G`）。
+- **最高权逃生门**：需要直捣真全局时显式用 `_G.xxx`（`_G` 名经 `__index` 可见，指向真全局表）。
 
 ## 8. 正则 `lib/regex`（PCRE2）
 

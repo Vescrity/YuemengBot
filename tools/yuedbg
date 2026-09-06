@@ -1,0 +1,77 @@
+#!/usr/bin/python3
+import os
+import sys
+import json
+import struct
+import socket
+
+DEFAULT_PATH = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "yuemeng.sock")
+
+
+def recv_exact(sock, n):
+    data = b""
+    while len(data) < n:
+        chunk = sock.recv(n - len(data))
+        if not chunk:
+            raise ConnectionError("连接已关闭")
+        data += chunk
+    return data
+
+
+def main():
+    path = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_PATH
+
+    try:
+        import readline
+    except ImportError:
+        readline = None
+
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.connect(path)
+    except OSError as e:
+        sys.stderr.write("连接失败: %s\n" % e)
+        return 1
+
+    while True:
+        try:
+            line = input("yuedbg> ")
+        except EOFError:
+            print()
+            break
+        except KeyboardInterrupt:
+            print()
+            continue
+        line = line.strip()
+        if line == "":
+            continue
+        if readline:
+            readline.add_history(line)
+
+        payload = line.encode("utf-8")
+        try:
+            sock.sendall(struct.pack(">I", len(payload)) + payload)
+            n = struct.unpack(">I", recv_exact(sock, 4))[0]
+            resp = json.loads(recv_exact(sock, n).decode("utf-8"))
+        except (OSError, ConnectionError, struct.error, ValueError) as e:
+            sys.stderr.write("通信错误: %s\n" % e)
+            break
+
+        out = resp.get("output")
+        if out:
+            sys.stdout.write(out)
+            if not out.endswith("\n"):
+                sys.stdout.write("\n")
+        if resp.get("ok"):
+            result = resp.get("result")
+            if result is not None:
+                sys.stdout.write(result + "\n")
+        else:
+            sys.stderr.write(str(resp.get("error", "未知错误")) + "\n")
+
+    sock.close()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

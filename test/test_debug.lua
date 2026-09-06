@@ -75,6 +75,27 @@ P.sync(function()
     local r4 = P.await(request(path, "1 + "))
     check("语法错误返回", not r4.ok and r4.error ~= nil)
 
+    local r5 = P.await(request(path, "_dbgX = 5"))
+    check("全局赋值写入持久 env", r5.ok)
+
+    local r6 = P.await(request(path, "return _dbgX * 2"))
+    check("状态跨请求持久", r6.ok and r6.result == "10")
+
+    local r7 = P.await(request(path, "return _G._dbgX == nil"))
+    check("不污染真 _G", r7.ok and r7.result == "true")
+
+    local r8 = P.await(request(path, "return type(core.platforms.list())"))
+    check("core 种子可用（无 require）", r8.ok and r8.result == "table")
+
+    local r9 = P.await(request(path, "return type(P.delay)"))
+    check("P 种子可用（无 require）", r9.ok and r9.result == "function")
+
+    local r10 = P.await(request(path, "_G.__dbgTest = 42"))
+    check("_G 逃生门可写真全局", r10.ok)
+
+    local r11 = P.await(request(path, "return _G.__dbgTest"))
+    check("_G 逃生门读回真全局", r11.ok and r11.result == "42")
+
     debug.stop()
 end)
 

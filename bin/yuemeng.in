@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # 由 bin/yuemeng.in 生成，勿手改
 set -euo pipefail
 
