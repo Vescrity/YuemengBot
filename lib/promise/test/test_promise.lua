@@ -205,6 +205,7 @@ P.sync(function()
     check("sync 返回 promise → await 接管", r == "inner")
 end)
 
+print("  （下面这段 [promise] 协程异常 traceback 是预期输出）")
 P.sync(function()
     local ok, err = pcall(P.await, P.sync(function() error("boom", 0) end))
     check("sync 内部 throw → await 抛原始 reason", (not ok) and tostring(err) == "boom")
