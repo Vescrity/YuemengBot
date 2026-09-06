@@ -92,7 +92,8 @@ function MoonBus:emit(e)
     local h = self._head
     while h do
         self._cursor.next = h._next
-        if not h._destroyed and h.match(e) then
+        assert(not h._destroyed, "遍历到已销毁的 handler")
+        if h.match(e) then
             local stop = h.consume(e)
             if h.run then P.sync(h.run, e) end
             if h.destroy and h.destroy() then self:_unlink(h) end

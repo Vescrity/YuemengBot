@@ -6,7 +6,7 @@
 ---   -- req  = { method, path, query, headers(表), body(字符串) }
 ---   -- resp = { status, headers, body } 或 字符串（简写 200）
 ---
---- 说明：v1 每个连接响应完即关闭（无 keep-alive）；body 按 Content-Length 读取。
+--- 说明：v1 每个连接响应完即关闭（无 keep-alive）；body 按 Content-Length 或 Transfer-Encoding: chunked 读取。
 
 local socket = require("socket")
 local P = require("promise")
@@ -79,6 +79,45 @@ local function await_readable(conn, timeout_ms)
     return P.await(P.withTimeout(P.fd(conn, "r"), timeout_ms))
 end
 
+local function recv_more(conn, buf, cfg)
+    local ok = pcall(await_readable, conn, cfg.idle_timeout_ms)
+    if not ok then return nil end
+    local data, err, partial = conn:receive(4096)
+    if data then
+        return buf .. data
+    elseif partial then
+        return buf .. partial
+    elseif err == "closed" then
+        return nil
+    end
+    return nil
+end
+
+-- 解码 Transfer-Encoding: chunked 的 body；失败返回 nil
+local function read_chunked_body(conn, buf, cfg)
+    local out = {}
+    while true do
+        local crlf = buf:find("\r\n", 1, true)
+        while not crlf do
+            buf = recv_more(conn, buf, cfg)
+            if not buf then return nil end
+            crlf = buf:find("\r\n", 1, true)
+        end
+        local size = tonumber(buf:sub(1, crlf - 1), 16)
+        if not size then return nil end
+        buf = buf:sub(crlf + 2)
+        if size == 0 then
+            return table.concat(out)
+        end
+        while #buf < size + 2 do
+            buf = recv_more(conn, buf, cfg)
+            if not buf then return nil end
+        end
+        out[#out + 1] = buf:sub(1, size)
+        buf = buf:sub(size + 3)
+    end
+end
+
 local function handle_connection(conn, handler, cfg)
     conn:settimeout(0)
 
@@ -120,32 +159,37 @@ local function handle_connection(conn, handler, cfg)
 
     local headers = headers_lib.parse_headers(header_block or "")
 
-    -- 按 Content-Length 读 body
+    -- 按 Content-Length 或 chunked 读 body
     local body = rest
-    local cl = headers["content-length"]
-    if type(cl) == "string" then
-        cl = tonumber(cl)
-    else
-        cl = nil
+    local te = headers["transfer-encoding"]
+    if type(te) == "table" then
+        te = table.concat(te, ",")
     end
-    if cl then
-        if cl > cfg.max_body_bytes then
-            write_response(conn, { status = 413, body = "body too large" }, cfg.idle_timeout_ms)
+    if te and te:lower():find("chunked", 1, true) then
+        body = read_chunked_body(conn, body, cfg)
+        if not body then
+            write_response(conn, { status = 400, body = "bad chunked body" }, cfg.idle_timeout_ms)
             return
         end
-        while #body < cl do
-            local ok = pcall(await_readable, conn, cfg.idle_timeout_ms)
-            if not ok then return end
-            local data, err, partial = conn:receive(4096)
-            if data then
-                body = body .. data
-            elseif partial then
-                body = body .. partial
-            elseif err == "closed" then
-                break
-            end
+    else
+        local cl = headers["content-length"]
+        if type(cl) == "string" then
+            cl = tonumber(cl)
+        else
+            cl = nil
         end
-        if #body > cl then body = body:sub(1, cl) end
+        if cl then
+            if cl > cfg.max_body_bytes then
+                write_response(conn, { status = 413, body = "body too large" }, cfg.idle_timeout_ms)
+                return
+            end
+            while #body < cl do
+                local more = recv_more(conn, body, cfg)
+                if not more then return end
+                body = more
+            end
+            if #body > cl then body = body:sub(1, cl) end
+        end
     end
 
     -- 拆分 path / query
