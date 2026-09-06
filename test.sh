@@ -40,4 +40,28 @@ echo "=== http server 自测 ==="
 timeout 30 lua lib/http/test/test_server.lua
 
 echo
+echo "=== 编译 regex C 绑定 ==="
+bash lib/regex/build.sh
+
+echo
+echo "=== regex 库测试 ==="
+lua lib/regex/test/test_regex.lua
+
+echo
+echo "=== 核心单元测试 ==="
+lua test/test_core.lua
+
+echo
+echo "=== 测试平台 + echo 集成 ==="
+timeout 30 lua test/test_integration.lua
+
+echo
+echo "=== debug 框架 ==="
+timeout 30 lua test/test_debug.lua
+
+echo
+echo "=== 安装冒烟 ==="
+bash test/test_install.sh
+
+echo
 echo "=== 全部通过 ==="

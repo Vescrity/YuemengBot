@@ -35,7 +35,8 @@ jm26/
 ├── docs/DESIGN.md
 ├── lib/
 │   ├── promise/
-│   └── http/
+│   ├── http/
+│   └── regex/                 # PCRE2 绑定
 ├── src/
 │   ├── core/
 │   │   ├── init.lua         # 引导与装配（导出 core 命名空间）
@@ -59,6 +60,10 @@ jm26/
 ├── bin/
 │   └── yuemeng.in           # 启动器模板（Makefile 生成 bin/yuemeng）
 └── test/
+    ├── test_core.lua         # 核心单元测试
+    ├── test_integration.lua  # 测试平台 + echo 端到端
+    ├── test_debug.lua        # debug 框架
+    └── test_install.sh       # 安装冒烟
 ```
 
 ## 5. 核心抽象
@@ -272,11 +277,25 @@ logger:fatal(msg, ...)
 
 ## 7. Debug 框架 `core/debug`
 
-- unix socket（文件，默认 `$XDG_RUNTIME_DIR/yuemeng.sock`），非 TCP。
+- unix socket（文件，默认 `$XDG_RUNTIME_DIR/yuemeng.sock`），非 TCP；底层用 luv pipe（luasocket 无 unix 支持）。
 - 协议：4 字节大端长度前缀 + 载荷。
 - 请求 = Lua 源码；响应 = 输出或 traceback；每请求独立 `P.sync` 协程，与总线解耦。
 
-## 8. 构建与安装
+## 8. 正则 `lib/regex`（PCRE2）
+
+C 绑定（`regex.so`，PCRE2-8），供插件做消息模式匹配：
+
+```lua
+local regex = require("regex")
+
+regex.new(pattern, flags)      -- -> Regex；flags: i/m/s/x/u
+regex.match(pattern, subject, flags)  -- 一次性匹配
+
+re:match(subject)              -- 命中返回 { [1]=整体, [2..]=捕获组 }，否则 nil
+re:find(subject)               -- 命中返回 start, end（1 基），否则 nil
+```
+
+## 9. 构建与安装
 
 - 构建工具：**Makefile**（gcc）。
 - 安装布局（`PREFIX` 默认 `/usr/local`）：
@@ -293,21 +312,23 @@ sed -e 's|@PREFIX@|$(PREFIX)|g' -e 's|@VERSION@|$(VERSION)|g' \
 
 - 生成后的启动器设置 `LUA_PATH`（含 `share/yuemeng`）与 `LUA_CPATH`（含 `.so` 目录）后 `exec lua main.lua`。
 
-## 9. 代码约定
+## 10. 代码约定
 
 - 标识符 **camelCase**；常量按 camelCase（`perm.groupAdmin`）。
 - 模块文件名小写（`moonbus.lua`、`service/path.lua`）。
 - 缩进 4 空格；`.luarc.json` 设 `runtime.version = "Lua 5.5"`；luacheck 关卡（命令写入 `AGENTS.md`）。
 - 提交 `<type>: <简述>`，不用 skill。
 
-## 10. 测试
+## 11. 测试
 
-- 单元测试（moonbus 遍历/摘除、perm 累加、config 装配等）。
-- HTTP 集成测试（测试平台端到端）。
-- 安装测试：装到临时 `PREFIX` + 指定 config 目录启动冒烟。
-- luacheck。
+- `test/test_core.lua`：核心单元测试（perm/channel/event/moonbus 遍历·摘除·游标·门禁/config/plugin/log）。
+- `test/test_integration.lua`：测试平台 + echo 端到端。
+- `test/test_debug.lua`：debug 框架往返。
+- `test/test_install.sh`：装到临时 `PREFIX` + 指定 config 目录启动冒烟。
+- `lib/regex/test/test_regex.lua`：PCRE2 绑定自测。
+- 统一入口 `test.sh`；lint 关卡 `luacheck src/ lib/`。
 
-## 11. 里程碑与延后项
+## 12. 里程碑与延后项
 
 - **M0**：核心骨架 + 服务（perm/channel/event/platform/moonbus/plugin + path/config/log）+ Makefile/启动器 + docs + `.luarc.json`/`opencode.json`/`AGENTS.md`。
 - **M1**：测试平台 `platform/test.lua`（HTTP 最小协议）。

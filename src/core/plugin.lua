@@ -16,8 +16,18 @@ local function loadChunk(chunk, name)
     return mod
 end
 
-function plugin.load(chunk, name)
-    return loadChunk(chunk, name or "(plugin)")
+function plugin.load(name)
+    local path = package.searchpath(name, package.path)
+    if not path then
+        error("插件不存在: " .. tostring(name))
+    end
+    local f = io.open(path, "rb")
+    if not f then
+        error("插件文件不可读: " .. tostring(path))
+    end
+    local chunk = f:read("a")
+    f:close()
+    return loadChunk(chunk, name)
 end
 
 function plugin.loadFile(path)
@@ -29,6 +39,10 @@ function plugin.loadFile(path)
     f:close()
     local name = path:match("([^/]+)%.lua$") or path
     return loadChunk(chunk, name)
+end
+
+function plugin.loadChunk(chunk, name)
+    return loadChunk(chunk, name or "(plugin)")
 end
 
 function plugin.init(pl)
