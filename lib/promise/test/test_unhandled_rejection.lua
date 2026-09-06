@@ -23,7 +23,7 @@ print("=== promise 未处理 rejection 检测 ===")
 local tmp_path = os.tmpname()
 local f = assert(io.open(tmp_path, "w"))
 local old_stderr = io.stderr
-io.stderr = f
+io.stderr = f -- luacheck: ignore 122
 
 -- 正向：永不处理的 rejection，应在事件循环结束时告警
 P.reject("leaked_rejection")
@@ -39,7 +39,7 @@ P.run()
 
 f:flush()
 f:close()
-io.stderr = old_stderr
+io.stderr = old_stderr -- luacheck: ignore 122
 local content = assert(io.open(tmp_path, "r")):read("*a")
 os.remove(tmp_path)
 

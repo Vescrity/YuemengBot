@@ -23,7 +23,7 @@ P.sync(function()
     -- fulfilled thenable：异步 resolve 值 42
     local then_called = false
     local thenable = {
-        ["then"] = function(self, onF, onR)
+        ["then"] = function(_self, onF, onR)
             then_called = true
             P.delay(10, 42):thenDo(onF, onR)
         end,
@@ -35,7 +35,7 @@ end)
 P.sync(function()
     -- rejected thenable：异步 reject "boom"
     local rej_thenable = {
-        ["then"] = function(self, onF, onR)
+        ["then"] = function(_self, _onF, onR)
             P.delay(10):thenDo(function() onR("boom") end)
         end,
     }

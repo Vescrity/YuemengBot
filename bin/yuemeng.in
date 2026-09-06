@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# 由 bin/yuemeng.in 生成，勿手改
+set -euo pipefail
+
+PREFIX="@PREFIX@"
+VERSION="@VERSION@"
+
+export LUA_PATH="@PREFIX@/share/yuemeng/?.lua;@PREFIX@/share/yuemeng/?/init.lua;@PREFIX@/share/yuemeng/promise/?.lua;@PREFIX@/share/yuemeng/http/?.lua;;"
+export LUA_CPATH="@PREFIX@/lib/yuemeng/lua/5.5/?.so;;"
+
+exec lua "@PREFIX@/share/yuemeng/main.lua" "$@"

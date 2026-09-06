@@ -26,7 +26,7 @@ P.sync(function()
     local buf = ""
     while true do
         P.await(P.fd(conn))
-        local data, err, partial = conn:receive(4096)
+        local data, _, partial = conn:receive(4096)
         if data then buf = buf .. data
         elseif partial then buf = buf .. partial end
         while true do
@@ -68,7 +68,7 @@ P.sync(function()
     local buf = ""
     while true do
         P.await(P.fd(client))
-        local data, err, partial = client:receive(4096)
+        local data, _, partial = client:receive(4096)
         if data then buf = buf .. data
         elseif partial then buf = buf .. partial end
         while true do

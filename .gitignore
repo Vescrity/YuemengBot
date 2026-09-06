@@ -1,3 +1,5 @@
-AGENTS.local.md
+AGENTS.md
 test.local/
 *.so
+ref/
+bin/yuemeng

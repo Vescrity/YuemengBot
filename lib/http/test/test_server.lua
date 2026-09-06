@@ -110,8 +110,8 @@ P.sync(function()
     local rawbuf = ""
     local read_t0 = uv.hrtime()
     while (uv.hrtime() - read_t0) / 1e9 < 20 do
-        local d, e, p = ch:receive(8192)
-        if d then rawbuf = rawbuf .. d end
+        local data, e, p = ch:receive(8192)
+        if data then rawbuf = rawbuf .. data end
         if p then rawbuf = rawbuf .. p end
         if e == "closed" then break end
         P.await(P.delay(1))
