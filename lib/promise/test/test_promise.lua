@@ -73,12 +73,21 @@ P.sync(function()
 end)
 
 P.sync(function()
+    local side_effect = false
+    local loser = P.delay(50):thenDo(function() side_effect = true end)
+    local ok, err = pcall(P.await, P.all({ P.reject("oops"), loser }))
+    check("all 失败后其余不被取消 (整体先 reject)", (not ok) and tostring(err) == "oops")
+    P.await(P.delay(80))
+    check("all 失败后其余仍执行并产生副作用", side_effect == true)
+end)
+
+P.sync(function()
     local rs = P.await(P.allSettled({
         P.resolve(1),
         P.reject("bad"),
     }))
-    check("allSettled 状态", rs[1].status == "fulfilled" and rs[1].value == 1
-        and rs[2].status == "rejected" and rs[2].reason == "bad")
+    check("allSettled 状态", rs[1].status == P.FULFILLED and rs[1].value == 1
+        and rs[2].status == P.REJECTED and rs[2].reason == "bad")
 end)
 
 P.sync(function()
@@ -100,7 +109,14 @@ end)
 
 P.sync(function()
     local ok, err = pcall(P.await, P.any({ P.reject("a"), P.reject("b") }))
-    check("any 全失败 reject", (not ok) and type(err) == "table" and err.errors ~= nil)
+    check("any 全失败 reject", (not ok) and type(err) == "table"
+        and err.name == "AggregateError" and err.errors ~= nil)
+end)
+
+P.sync(function()
+    local ok, err = pcall(P.await, P.any({}))
+    check("any 空列表 reject AggregateError", (not ok) and type(err) == "table"
+        and err.name == "AggregateError")
 end)
 
 P.sync(function()
@@ -137,7 +153,85 @@ P.sync(function()
     check("fd 等待可读 + accept", ok == true and conn ~= nil)
 end)
 
+P.sync(function()
+    local ok = P.await(P.fd(client, "w"))
+    check("fd 等待可写", ok == true)
+end)
+
+P.sync(function()
+    local r_all = P.await(P.all({}))
+    check("all 空列表返回空表", type(r_all) == "table" and next(r_all) == nil)
+    local r_settled = P.await(P.allSettled({}))
+    check("allSettled 空列表返回空表", type(r_settled) == "table" and next(r_settled) == nil)
+end)
+
+P.sync(function()
+    local ok, err = pcall(P.await, P.withTimeout(P.race({}), 30, "timeout"))
+    check("race 空列表永久 pending (超时)", (not ok) and tostring(err) == "timeout")
+end)
+
+P.sync(function()
+    local ok, err = pcall(P.await, P.resolve(1):finally(function() error("fboom", 0) end))
+    check("finally 回调 throw → 子 promise reject", (not ok) and tostring(err) == "fboom")
+end)
+
+P.sync(function()
+    local ok, err = pcall(P.await, P.new(function() error("eboom", 0) end))
+    check("executor 同步抛错 → reject", (not ok) and tostring(err) == "eboom")
+end)
+
+P.sync(function()
+    local ok, err = pcall(P.await, P.withTimeout(P.delay(300), 30))
+    check("withTimeout 默认 reason 为 timeout", (not ok) and tostring(err) == "timeout")
+end)
+
+P.sync(function()
+    local p
+    p = P.new(function(res)
+        P.delay(10):thenDo(function() res(p) end)
+    end)
+    local ok, err = pcall(P.await, p)
+    check("resolve 自己 → reject", (not ok) and tostring(err) == "Promise 不能 resolve 自己")
+end)
+
+-- async 一等公民：sync 返回 promise
+P.sync(function()
+    local r = P.await(P.sync(function() return 42 end))
+    check("await sync 返回值", r == 42)
+end)
+
+P.sync(function()
+    local r = P.await(P.sync(function() return P.delay(20, "inner") end))
+    check("sync 返回 promise → await 接管", r == "inner")
+end)
+
+P.sync(function()
+    local ok, err = pcall(P.await, P.sync(function() error("boom", 0) end))
+    check("sync 内部 throw → await 抛原始 reason", (not ok) and tostring(err) == "boom")
+end)
+
+-- 对齐 JS：race 不取消输者
+P.sync(function()
+    local loser_fired = false
+    local loser = P.delay(300, "slow")
+    loser:thenDo(function() loser_fired = true end, function() end)
+    local r = P.await(P.race({ loser, P.delay(20, "fast") }))
+    check("race 快者胜", r == "fast")
+    P.await(P.delay(350))
+    check("race 输者不被取消、仍会触发", loser_fired == true)
+end)
+
+-- 孤儿不等：withTimeout 里的超时定时器无人 await，事件循环不白等 5000ms
+P.sync(function()
+    local r = P.await(P.withTimeout(P.delay(20, "fast"), 5000, "timeout"))
+    check("withTimeout 不超时返回原值", r == "fast")
+end)
+
+local run_t0 = socket.gettime()
 P.run()
+local run_dt = (socket.gettime() - run_t0) * 1000
+
+check("事件循环在孤儿不等后及时退出", run_dt < 2000)
 
 print(string.format("\n=== 结果: %d 通过, %d 失败 ===", passed, failed))
 os.exit(failed == 0 and 0 or 1)

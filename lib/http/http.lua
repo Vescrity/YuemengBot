@@ -71,30 +71,36 @@ function M.request(method, url, opts)
         http_version = opts.http_version,
     }
 
-    return P.new(function(resolve, reject)
+    local p = P.new(function(resolve, reject)
         P.sync(function()
-            local req, err = curl.start(c_opts)
-            if not req then
-                reject({ kind = "curl", message = tostring(err) })
-                return
-            end
-            P.await(P.fd(req:fd()))
-            local ok, a, b = req:finish()
+            local ok, res = pcall(function()
+                local req, err = curl.start(c_opts)
+                if not req then
+                    reject({ kind = "curl", message = tostring(err) })
+                    return
+                end
+                P.await(P.fd(req:fd()))
+                local ok2, a, b = req:finish()
+                if not ok2 then
+                    reject({ kind = "curl", code = a, message = b })
+                elseif a.status >= 400 then
+                    reject({
+                        kind = "http",
+                        status = a.status,
+                        message = "HTTP " .. a.status,
+                        body = a.body,
+                        headers = a.headers,
+                    })
+                else
+                    resolve(a) -- { status, headers, body }
+                end
+            end)
             if not ok then
-                reject({ kind = "curl", code = a, message = b })
-            elseif a.status >= 400 then
-                reject({
-                    kind = "http",
-                    status = a.status,
-                    message = "HTTP " .. a.status,
-                    body = a.body,
-                    headers = a.headers,
-                })
-            else
-                resolve(a) -- { status, headers, body }
+                reject({ kind = "curl", message = tostring(res) })
             end
         end)
     end)
+    return p
 end
 
 -- ---------- header 解析工具 ----------

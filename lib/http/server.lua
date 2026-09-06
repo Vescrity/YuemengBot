@@ -20,13 +20,38 @@ local REASON = {
     [301] = "Moved Permanently", [302] = "Found", [304] = "Not Modified",
     [400] = "Bad Request", [401] = "Unauthorized", [403] = "Forbidden",
     [404] = "Not Found", [405] = "Method Not Allowed",
+    [408] = "Request Timeout",
+    [413] = "Payload Too Large", [414] = "URI Too Long",
+    [431] = "Request Header Fields Too Large",
     [500] = "Internal Server Error", [501] = "Not Implemented",
     [502] = "Bad Gateway", [503] = "Service Unavailable",
 }
 
+-- ---------- 发送 ----------
+
+local function send_all(conn, data, timeout_ms)
+    local off = 1
+    local total = #data
+    while off <= total do
+        local n, err, sent = conn:send(data:sub(off))
+        if n then
+            off = off + n
+        elseif err == "timeout" then
+            if sent and sent > 0 then off = off + sent end
+            local ok = pcall(function()
+                P.await(P.withTimeout(P.fd(conn, "w"), timeout_ms))
+            end)
+            if not ok then return false, "timeout" end
+        else
+            return false, err
+        end
+    end
+    return true
+end
+
 -- ---------- 响应写回 ----------
 
-local function write_response(conn, resp)
+local function write_response(conn, resp, timeout_ms)
     if type(resp) == "string" then resp = { body = resp } end
     resp = resp or {}
     local status = resp.status or 200
@@ -45,12 +70,16 @@ local function write_response(conn, resp)
     end
     lines[#lines + 1] = "Connection: close"
 
-    conn:send(table.concat(lines, "\r\n") .. "\r\n\r\n" .. body)
+    send_all(conn, table.concat(lines, "\r\n") .. "\r\n\r\n" .. body, timeout_ms)
 end
 
 -- ---------- 单连接处理（在协程内运行，可 P.await） ----------
 
-local function handle_connection(conn, handler)
+local function await_readable(conn, timeout_ms)
+    return P.await(P.withTimeout(P.fd(conn, "r"), timeout_ms))
+end
+
+local function handle_connection(conn, handler, cfg)
     conn:settimeout(0)
 
     -- 读请求头直到 \r\n\r\n
@@ -59,13 +88,18 @@ local function handle_connection(conn, handler)
     while true do
         head_end = buf:find("\r\n\r\n", 1, true)
         if head_end then break end
-        P.await(P.fd(conn))
+        local ok = pcall(await_readable, conn, cfg.idle_timeout_ms)
+        if not ok then return end
         local data, err, partial = conn:receive(4096)
         if data then
             buf = buf .. data
         elseif partial then
             buf = buf .. partial
         elseif err == "closed" then
+            return
+        end
+        if #buf > cfg.max_header_bytes then
+            write_response(conn, { status = 431, body = "header too large" }, cfg.idle_timeout_ms)
             return
         end
     end
@@ -75,12 +109,12 @@ local function handle_connection(conn, handler)
 
     local reqline, header_block = head:match("^(.-)\r\n(.*)$")
     if not reqline then
-        write_response(conn, { status = 400, body = "bad request" })
+        write_response(conn, { status = 400, body = "bad request" }, cfg.idle_timeout_ms)
         return
     end
     local method, target = reqline:match("^(%S+)%s+(%S+)%s+HTTP/")
     if not method then
-        write_response(conn, { status = 400, body = "bad request" })
+        write_response(conn, { status = 400, body = "bad request" }, cfg.idle_timeout_ms)
         return
     end
 
@@ -88,10 +122,20 @@ local function handle_connection(conn, handler)
 
     -- 按 Content-Length 读 body
     local body = rest
-    local cl = tonumber(headers["content-length"])
+    local cl = headers["content-length"]
+    if type(cl) == "string" then
+        cl = tonumber(cl)
+    else
+        cl = nil
+    end
     if cl then
+        if cl > cfg.max_body_bytes then
+            write_response(conn, { status = 413, body = "body too large" }, cfg.idle_timeout_ms)
+            return
+        end
         while #body < cl do
-            P.await(P.fd(conn))
+            local ok = pcall(await_readable, conn, cfg.idle_timeout_ms)
+            if not ok then return end
             local data, err, partial = conn:receive(4096)
             if data then
                 body = body .. data
@@ -116,17 +160,17 @@ local function handle_connection(conn, handler)
 
     local ok, resp = pcall(handler, req)
     if not ok then
-        write_response(conn, { status = 500, body = tostring(resp) })
+        write_response(conn, { status = 500, body = tostring(resp) }, cfg.idle_timeout_ms)
         return
     end
 
     -- handler 可能返回 promise
     local ok2, resp2 = pcall(P.await, resp)
     if not ok2 then
-        write_response(conn, { status = 500, body = tostring(resp2) })
+        write_response(conn, { status = 500, body = tostring(resp2) }, cfg.idle_timeout_ms)
         return
     end
-    write_response(conn, resp2)
+    write_response(conn, resp2, cfg.idle_timeout_ms)
 end
 
 -- ---------- 服务器 ----------
@@ -147,6 +191,9 @@ function M.new(opts)
         host = host,
         port = port,
         closed = false,
+        max_header_bytes = opts.max_header_bytes or 64 * 1024,
+        max_body_bytes = opts.max_body_bytes or 4 * 1024 * 1024,
+        idle_timeout_ms = opts.idle_timeout and (opts.idle_timeout * 1000) or 30000,
     }, M)
 
     local _, actual = srv:getsockname()
@@ -158,13 +205,26 @@ function M:start(handler)
     local srv = self.socket
     P.sync(function()
         while not self.closed do
-            P.await(P.fd(srv))
+            local p = P.new(function(resolve, reject)
+                self._accept_resolve = resolve
+                self._accept_stop = P.backend.wait_fd(srv, function()
+                    self._accept_stop = nil
+                    self._accept_resolve = nil
+                    resolve(true)
+                end, "r")
+                if not self._accept_stop then
+                    self._accept_resolve = nil
+                    reject("wait_fd 创建失败")
+                end
+            end)
+            local ok = pcall(P.await, p)
+            if not ok then break end
             if self.closed then break end
             local conn = srv:accept()
             if conn then
                 P.sync(function()
-                    local ok, err = pcall(handle_connection, conn, handler)
-                    if not ok then
+                    local ok2, err = pcall(handle_connection, conn, handler, self)
+                    if not ok2 then
                         io.stderr:write("[http.server] 连接异常: " .. tostring(err) .. "\n")
                     end
                     conn:close()
@@ -175,9 +235,18 @@ function M:start(handler)
     return self
 end
 
--- 停止接受新连接（best-effort：不会唤醒已阻塞的 accept，进程退出场景够用）
 function M:close()
+    if self.closed then return self end
     self.closed = true
+    if self._accept_stop then
+        self._accept_stop()
+        self._accept_stop = nil
+    end
+    if self._accept_resolve then
+        local r = self._accept_resolve
+        self._accept_resolve = nil
+        r(false)
+    end
     self.socket:close()
     return self
 end

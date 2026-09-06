@@ -2,7 +2,7 @@
 --- thenDo / catch / finally + 组合器(all/allSettled/race/any)
 --- + 定时器(delay/withTimeout) + IO(fd) + 协程桥(sync/await)
 --- 后端固定为 luv(libuv)。
---- 后端只提供 timer / wait_fd / hold / pending / step 五个原语。
+--- 后端只提供 timer / wait_fd / pending / step 四个原语。
 
 local backend = require("backend_luv")
 
@@ -10,11 +10,17 @@ local M = {}
 M.__index = M
 M.backend = backend
 
-local PENDING, FULFILLED, REJECTED = "pending", "fulfilled", "rejected"
+-- 状态用整数常量（0=pending / 1=fulfilled / 2=rejected），导出供调用方比较
+local PENDING, FULFILLED, REJECTED = 0, 1, 2
+M.PENDING = PENDING
+M.FULFILLED = FULFILLED
+M.REJECTED = REJECTED
 
 -- ---------- 调度器状态 ----------
 local microtasks = {}   -- 微任务队列（then/catch 回调统一在这里执行）
 local ready_co = {}     -- 可运行协程队列
+local unhandled = {}    -- 已 reject 且尚未挂 handler 的 promise（事件循环结束时统一检查）
+local active = 0        -- 当前正在 await 一个未决 promise 的协程数（事件循环退出判据）
 
 local function enqueue(fn)
     microtasks[#microtasks + 1] = fn
@@ -30,7 +36,6 @@ local function new_promise()
         _reason = nil,
         _handlers = nil,
         _locked = false,
-        _unhandled = true,
     }, M)
     local function lock()
         if p._locked then return false end
@@ -61,22 +66,22 @@ schedule_handlers = function(p)
     local hs = p._handlers
     p._handlers = nil
     if not hs then return end
-    local isReject = (p._state == REJECTED)
+    local is_reject = (p._state == REJECTED)
     local arg = p._value
-    if isReject then arg = p._reason end
+    if is_reject then arg = p._reason end
     for i = 1, #hs do
         local h = hs[i]
-        enqueue(function() run_handler(h, arg, isReject) end)
+        enqueue(function() run_handler(h, arg, is_reject) end)
     end
 end
 
 -- 执行单个 handler，把结果（普通值/thenable/异常）传导到 child
-run_handler = function(h, arg, isReject)
-    local fn = h.onRejected
-    if not isReject then fn = h.onFulfilled end
+run_handler = function(h, arg, is_reject)
+    local fn = h.on_rejected
+    if not is_reject then fn = h.on_fulfilled end
     local child = h.child
     if not fn then
-        if isReject then reject_promise(child, arg) else resolve_promise(child, arg) end
+        if is_reject then reject_promise(child, arg) else resolve_promise(child, arg) end
         return
     end
     local ok, result = pcall(fn, arg)
@@ -94,24 +99,24 @@ resolve_promise = function(p, x)
     end
     if is_thenable(x) then
         local called = false
-        local function onFulfilled(v)
+        local function on_fulfilled(v)
             if called then return end
             called = true
             resolve_promise(p, v)
         end
-        local function onRejected(e)
+        local function on_rejected(e)
             if called then return end
             called = true
             reject_promise(p, e)
         end
         local ok, err = pcall(function()
             if is_promise(x) then
-                x:thenDo(onFulfilled, onRejected)
+                x:thenDo(on_fulfilled, on_rejected)
             else
-                x["then"](x, onFulfilled, onRejected)
+                x["then"](x, on_fulfilled, on_rejected)
             end
         end)
-        if not ok then onRejected(err) end
+        if not ok then on_rejected(err) end
         return
     end
     p._state = FULFILLED
@@ -122,36 +127,33 @@ end
 reject_promise = function(p, e)
     p._state = REJECTED
     p._reason = e
+    local handled = p._handlers ~= nil and #p._handlers > 0
     schedule_handlers(p)
-    if p._unhandled then
-        enqueue(function()
-            if p._unhandled and p._state == REJECTED then
-                io.stderr:write("[promise] 未处理的 rejection: " .. tostring(e) .. "\n")
-            end
-        end)
+    if not handled then
+        unhandled[p] = true
     end
 end
 
 -- ---------- 实例方法 ----------
 
-function M:thenDo(onFulfilled, onRejected)
-    self._unhandled = false
+function M:thenDo(on_fulfilled, on_rejected)
+    unhandled[self] = nil
     local child = new_promise()
-    local h = { onFulfilled = onFulfilled, onRejected = onRejected, child = child }
+    local h = { on_fulfilled = on_fulfilled, on_rejected = on_rejected, child = child }
     if self._state == PENDING then
         self._handlers = self._handlers or {}
         self._handlers[#self._handlers + 1] = h
     else
-        local isReject = (self._state == REJECTED)
+        local is_reject = (self._state == REJECTED)
         local arg = self._value
-        if isReject then arg = self._reason end
-        enqueue(function() run_handler(h, arg, isReject) end)
+        if is_reject then arg = self._reason end
+        enqueue(function() run_handler(h, arg, is_reject) end)
     end
     return child
 end
 
-function M:catch(onRejected)
-    return self:thenDo(nil, onRejected)
+function M:catch(on_rejected)
+    return self:thenDo(nil, on_rejected)
 end
 
 function M:finally(fn)
@@ -161,7 +163,7 @@ function M:finally(fn)
             return M.resolve(fn()):thenDo(function() return value end)
         end,
         function(reason)
-            return M.resolve(fn()):thenDo(function() error(reason, 0) end)
+            return M.resolve(fn()):thenDo(function() return M.reject(reason) end)
         end
     )
 end
@@ -219,8 +221,8 @@ function M.allSettled(list)
         local remaining = n
         for i = 1, n do
             M.resolve(list[i]):thenDo(
-                function(v) results[i] = { status = "fulfilled", value = v } end,
-                function(e) results[i] = { status = "rejected", reason = e } end
+                function(v) results[i] = { status = FULFILLED, value = v } end,
+                function(e) results[i] = { status = REJECTED, reason = e } end
             ):finally(function()
                 remaining = remaining - 1
                 if remaining == 0 then resolve(results) end
@@ -229,19 +231,40 @@ function M.allSettled(list)
     end)
 end
 
+-- race 空列表永不 settle（对齐 JS Promise.race([]) 永久 pending）
 function M.race(list)
     list = list or {}
     return M.new(function(resolve, reject)
+        local settled = false
+        local function win(fn)
+            return function(...)
+                if settled then return end
+                settled = true
+                fn(...)
+            end
+        end
         for i = 1, #list do
-            M.resolve(list[i]):thenDo(resolve, reject)
+            M.resolve(list[i]):thenDo(win(resolve), win(reject))
         end
     end)
+end
+
+function M.AggregateError(errors, message)
+    return setmetatable({
+        name = "AggregateError",
+        message = message or "All Promises rejected",
+        errors = errors or {},
+    }, {
+        __tostring = function(self)
+            return "AggregateError: " .. self.message
+        end,
+    })
 end
 
 function M.any(list)
     list = list or {}
     local n = #list
-    if n == 0 then return M.reject({ message = "空列表" }) end
+    if n == 0 then return M.reject(M.AggregateError({}, "空列表")) end
     return M.new(function(resolve, reject)
         local remaining = n
         local errors = {}
@@ -250,7 +273,7 @@ function M.any(list)
                 errors[i] = e
                 remaining = remaining - 1
                 if remaining == 0 then
-                    reject({ message = "全部被拒绝", errors = errors })
+                    reject(M.AggregateError(errors, "全部被拒绝"))
                 end
             end)
         end
@@ -259,45 +282,51 @@ end
 
 -- ---------- 定时器 / IO ----------
 
--- 保活事件循环：返回一个 release 函数，调用前会阻止 run() 提前退出。
--- 供线程池等"不在 timer/wait_fd 内"的异步操作使用。
-function M.hold()
-    return backend.hold()
-end
-
-function M.delay(ms, value)
+local function timer_promise(ms, on_fire)
     local p = new_promise()
-    backend.timer(ms, function() p._resolve_fn(value) end)
+    backend.timer(ms, function() on_fire(p) end)
     return p
 end
 
-function M.fd(fd)
+function M.delay(ms, value)
+    return timer_promise(ms, function(p) p._resolve_fn(value) end)
+end
+
+function M.fd(fd, events)
     local p = new_promise()
-    backend.wait_fd(fd, function() p._resolve_fn(true) end)
+    local stop = backend.wait_fd(fd, function() p._resolve_fn(true) end, events)
+    if not stop then
+        p._reject_fn("wait_fd 创建失败")
+    end
     return p
 end
 
 function M.withTimeout(p, ms, reason)
-    return M.race({
-        M.resolve(p),
-        M.new(function(_, reject)
-            backend.timer(ms, function() reject(reason or "timeout") end)
-        end),
-    })
+    local timeout = timer_promise(ms, function(tp) tp._reject_fn(reason or "timeout") end)
+    return M.race({ M.resolve(p), timeout })
 end
 
 -- ---------- 协程桥 ----------
 
 function M.sync(fn, ...)
     local args = { n = select("#", ...), ... }
+    local p = new_promise()
     local co = coroutine.create(function()
-        local ok, err = xpcall(fn, debug.traceback, table.unpack(args, 1, args.n))
-        if not ok then
-            io.stderr:write("[promise] 协程异常:\n" .. tostring(err) .. "\n")
+        local ok, ret = xpcall(
+            function() return fn(table.unpack(args, 1, args.n)) end,
+            function(e)
+                io.stderr:write("[promise] 协程异常:\n" .. debug.traceback(e, 2) .. "\n")
+                return e
+            end
+        )
+        if ok then
+            p._resolve_fn(ret)
+        else
+            p._reject_fn(ret)
         end
     end)
     ready_co[#ready_co + 1] = co
-    return co
+    return p
 end
 
 function M.await(p)
@@ -305,11 +334,13 @@ function M.await(p)
     if isMain or co == nil then
         error("promise.await 只能在协程内调用（配合 promise.sync）", 2)
     end
-    if not is_promise(p) then return p end
-    if p._state == FULFILLED then return p._value end
-    if p._state == REJECTED then error(p._reason, 0) end
-    local function resume() ready_co[#ready_co + 1] = co end
+    if not is_promise(p) then p = M.resolve(p) end
+    local function resume()
+        active = active - 1
+        ready_co[#ready_co + 1] = co
+    end
     p:thenDo(resume, resume)
+    active = active + 1
     coroutine.yield()
     if p._state == REJECTED then error(p._reason, 0) end
     return p._value
@@ -346,6 +377,16 @@ local function run_coroutines()
     return did
 end
 
+-- 事件循环结束时统一报告：仍无人处理（无 handler）的 rejection
+local function report_unhandled()
+    for p in pairs(unhandled) do
+        if p._state == REJECTED then
+            io.stderr:write("[promise] 未处理的 rejection: " .. tostring(p._reason) .. "\n")
+        end
+        unhandled[p] = nil
+    end
+end
+
 function M.run()
     while true do
         local did
@@ -355,12 +396,14 @@ function M.run()
             did = run_coroutines() or did
         until not did
 
-        if not backend.pending() and #ready_co == 0 and #microtasks == 0 then
+        if active == 0 and #ready_co == 0 and #microtasks == 0 then
             break
         end
 
         backend.step()
     end
+    backend.clear()
+    report_unhandled()
 end
 
 return M

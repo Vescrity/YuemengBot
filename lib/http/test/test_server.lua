@@ -8,6 +8,7 @@ local http = require("http")
 local P = require("promise")
 local cjson = require("cjson")
 local uv = require("luv")
+local socket = require("socket")
 
 local passed, failed = 0, 0
 local function check(name, cond)
@@ -24,6 +25,10 @@ print("=== http.server 自测 ===")
 
 local srv = assert(server.new({ host = "127.0.0.1", port = 0 }))
 local base = "http://127.0.0.1:" .. srv.port
+
+local srv431 = assert(server.new({ host = "127.0.0.1", port = 0, max_header_bytes = 200 }))
+local base431 = "http://127.0.0.1:" .. srv431.port
+srv431:start(function() return "ok" end)
 
 local received = {}
 
@@ -43,6 +48,10 @@ srv:start(function(req)
                 res("async ok")
             end)
         end)
+    elseif req.path == "/big" then
+        return string.rep("x", 200 * 1024)
+    elseif req.path == "/huge" then
+        return string.rep("0123456789", 400000)
     elseif req.path == "/404" then
         return { status = 404, body = "nope" }
     else
@@ -89,8 +98,41 @@ P.sync(function()
     check("并发 3 个 slow 请求", #rs == 3 and rs[1].body == "slow ok" and rs[3].body == "slow ok")
     check("并发耗时 < 600ms", dt < 0.6)
 
-    print(string.format("\n=== 结果: %d 通过, %d 失败 ===", passed, failed))
-    os.exit(failed == 0 and 0 or 1)
+    -- 大 body 不截断
+    local rbig = P.await(http.get(base .. "/big"))
+    check("大响应体完整 (200KB)", rbig.status == 200 and #rbig.body == 200 * 1024)
+
+    -- 慢读客户端 + 大响应（backpressure）
+    local ch = socket.tcp()
+    ch:settimeout(0)
+    ch:connect("127.0.0.1", srv.port)
+    ch:send("GET /huge HTTP/1.1\r\nHost: x\r\n\r\n")
+    local rawbuf = ""
+    local read_t0 = uv.hrtime()
+    while (uv.hrtime() - read_t0) / 1e9 < 20 do
+        local d, e, p = ch:receive(8192)
+        if d then rawbuf = rawbuf .. d end
+        if p then rawbuf = rawbuf .. p end
+        if e == "closed" then break end
+        P.await(P.delay(1))
+    end
+    ch:close()
+    local hend = rawbuf:find("\r\n\r\n", 1, true)
+    local hbody = hend and rawbuf:sub(hend + 4) or ""
+    check("慢读大响应体长度 (4MB)", #hbody == 4000000)
+    check("慢读大响应体内容", hbody:sub(1, 10) == "0123456789" and hbody:sub(-10) == "0123456789")
+
+    -- 超大头 -> 431
+    local ok431, err431 = pcall(function()
+        return P.await(http.get(base431 .. "/", { headers = { ["X-Big"] = string.rep("a", 500) } }))
+    end)
+    check("超大头返回 431", not ok431 and err431.kind == "http" and err431.status == 431)
+
+    srv:close()
+    srv431:close()
 end)
 
 P.run()
+
+print(string.format("\n=== 结果: %d 通过, %d 失败 ===", passed, failed))
+os.exit(failed == 0 and 0 or 1)

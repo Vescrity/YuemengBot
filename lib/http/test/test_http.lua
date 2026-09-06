@@ -1,5 +1,5 @@
---- test_http.lua - http.lua 自测（依赖 test.local/http_server.py 慢服务端）
---- 跑法：先启动服务端 python3 test.local/http_server.py [port]，再
+--- test_http.lua - http.lua 自测（依赖 http_server.py 慢服务端）
+--- 跑法：先启动服务端 python3 http_server.py [port]，再
 ---   lua lib/http/test/test_http.lua [port]
 local dir = arg[0]:match("^(.*)/") or "."
 package.cpath = dir .. "/../?.so;" .. package.cpath
@@ -68,6 +68,10 @@ P.sync(function()
     -- 连接被拒 -> reject kind=curl
     local ok2, err2 = pcall(function() return P.await(http.get("http://127.0.0.1:1/", { connect_timeout = 1 })) end)
     check("连接失败 reject kind=curl", not ok2 and type(err2) == "table" and err2.kind == "curl")
+
+    -- 非法 timeout -> reject（不挂死）
+    local ok3, err3 = pcall(function() return P.await(http.get(base .. "/hello", { timeout = "abc" })) end)
+    check("非法 timeout reject kind=curl", not ok3 and type(err3) == "table" and err3.kind == "curl")
 end)
 
 P.run()
