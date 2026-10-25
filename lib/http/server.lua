@@ -79,18 +79,22 @@ local function await_readable(conn, timeout_ms)
     return P.await(P.withTimeout(P.fd(conn, "r"), timeout_ms))
 end
 
+-- 读一次数据；对端关闭/出错/无可读数据时返回 nil。
+-- 注意：LuaSocket 在对端关闭时返回 nil, "closed", ""，空串 partial 不能再当数据用，
+-- 否则调用方会在 EOF 上无限循环。
+local function recv_chunk(conn)
+    local data, err, partial = conn:receive(4096)
+    if data and #data > 0 then return data end
+    if partial and #partial > 0 then return partial end
+    return nil, err
+end
+
 local function recv_more(conn, buf, cfg)
     local ok = pcall(await_readable, conn, cfg.idle_timeout_ms)
     if not ok then return nil end
-    local data, err, partial = conn:receive(4096)
-    if data then
-        return buf .. data
-    elseif partial then
-        return buf .. partial
-    elseif err == "closed" then
-        return nil
-    end
-    return nil
+    local chunk = recv_chunk(conn)
+    if not chunk then return nil end
+    return buf .. chunk
 end
 
 -- 解码 Transfer-Encoding: chunked 的 body；失败返回 nil
@@ -129,14 +133,9 @@ local function handle_connection(conn, handler, cfg)
         if head_end then break end
         local ok = pcall(await_readable, conn, cfg.idle_timeout_ms)
         if not ok then return end
-        local data, err, partial = conn:receive(4096)
-        if data then
-            buf = buf .. data
-        elseif partial then
-            buf = buf .. partial
-        elseif err == "closed" then
-            return
-        end
+        local chunk = recv_chunk(conn)
+        if not chunk then return end
+        buf = buf .. chunk
         if #buf > cfg.max_header_bytes then
             write_response(conn, { status = 431, body = "header too large" }, cfg.idle_timeout_ms)
             return
@@ -261,19 +260,31 @@ function M:start(handler)
                     reject("wait_fd 创建失败")
                 end
             end)
-            local ok = pcall(P.await, p)
-            if not ok then break end
+            local ok, err = pcall(P.await, p)
+            if not ok then
+                io.stderr:write("[http.server] accept 等待失败: " .. tostring(err) .. "\n")
+                break
+            end
             if self.closed then break end
-            local conn = srv:accept()
-            if conn then
+            local okA, conn, aerr = pcall(srv.accept, srv)
+            if not okA then
+                io.stderr:write("[http.server] accept 异常: " .. tostring(conn) .. "\n")
+                P.await(P.delay(10))
+            elseif conn then
                 P.sync(function()
-                    local ok2, err = pcall(handle_connection, conn, handler, self)
+                    local ok2, err2 = pcall(handle_connection, conn, handler, self)
                     if not ok2 then
-                        io.stderr:write("[http.server] 连接异常: " .. tostring(err) .. "\n")
+                        io.stderr:write("[http.server] 连接异常: " .. tostring(err2) .. "\n")
                     end
                     conn:close()
                 end)
+            elseif aerr and aerr ~= "timeout" then
+                io.stderr:write("[http.server] accept 失败: " .. tostring(aerr) .. "\n")
+                P.await(P.delay(10))
             end
+        end
+        if not self.closed then
+            io.stderr:write("[http.server] accept 循环已退出，不再接收新连接\n")
         end
     end)
     return self

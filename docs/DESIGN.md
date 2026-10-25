@@ -326,6 +326,7 @@ sed -e 's|@PREFIX@|$(PREFIX)|g' -e 's|@VERSION@|$(VERSION)|g' \
 
 - `test/test_core.lua`：核心单元测试（perm/channel/event/moonbus 遍历·摘除·游标·门禁/config/plugin/log）。
 - `test/test_integration.lua`：测试平台 + echo 端到端。
+- `test/test_abrupt_close.lua`：客户端异常断连回归（连接协程不得在 EOF 上空转）。
 - `test/test_debug.lua`：debug 框架往返。
 - `test/test_install.sh`：装到临时 `PREFIX` + 指定 config 目录启动冒烟。
 - `lib/regex/test/test_regex.lua`：PCRE2 绑定自测。

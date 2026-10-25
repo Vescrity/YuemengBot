@@ -284,12 +284,13 @@ end
 
 local function timer_promise(ms, on_fire)
     local p = new_promise()
-    backend.timer(ms, function() on_fire(p) end)
-    return p
+    local stop = backend.timer(ms, function() on_fire(p) end)
+    return p, stop
 end
 
 function M.delay(ms, value)
-    return timer_promise(ms, function(p) p._resolve_fn(value) end)
+    local p = timer_promise(ms, function(tp) tp._resolve_fn(value) end)
+    return p
 end
 
 function M.fd(fd, events)
@@ -302,8 +303,13 @@ function M.fd(fd, events)
 end
 
 function M.withTimeout(p, ms, reason)
-    local timeout = timer_promise(ms, function(tp) tp._reject_fn(reason or "timeout") end)
-    return M.race({ M.resolve(p), timeout })
+    local input = M.resolve(p)
+    local timeout, stop = timer_promise(ms, function(tp) tp._reject_fn(reason or "timeout") end)
+    local result = M.race({ input, timeout })
+    -- 主体先落定时立刻停掉超时定时器，避免长时间存活的定时器堆积。
+    -- 超时先触发时 stop 已是 no-op。
+    if stop then input:thenDo(stop, stop) end
+    return result
 end
 
 -- ---------- 协程桥 ----------

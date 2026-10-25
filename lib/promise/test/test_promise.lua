@@ -3,6 +3,7 @@ local dir = arg[0]:match("^(.*)/") or "."
 package.path = dir .. "/../?.lua;" .. package.path
 
 local socket = require("socket")
+local uv = require("luv")
 local P = require("promise")
 
 local passed, failed = 0, 0
@@ -134,6 +135,20 @@ end)
 P.sync(function()
     local r = P.await(P.withTimeout(P.delay(20, "ok"), 200, "timeout"))
     check("withTimeout 不超时返回原值", r == "ok")
+end)
+
+P.sync(function()
+    local function timerCount()
+        local n = 0
+        uv.walk(function(h)
+            if h:get_type() == "timer" and h:is_active() then n = n + 1 end
+        end)
+        return n
+    end
+    local before = timerCount()
+    local r = P.await(P.withTimeout(P.delay(20, "ok"), 60000, "timeout"))
+    local after = timerCount()
+    check("withTimeout 落定后停掉超时定时器", r == "ok" and after <= before)
 end)
 
 local server = socket.tcp()

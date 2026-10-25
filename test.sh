@@ -56,6 +56,10 @@ echo "=== 测试平台 + echo 集成 ==="
 timeout 30 lua test/test_integration.lua
 
 echo
+echo "=== 客户端异常断连 ==="
+timeout 30 lua test/test_abrupt_close.lua
+
+echo
 echo "=== debug 框架 ==="
 timeout 30 lua test/test_debug.lua
 
